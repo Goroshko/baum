@@ -166,6 +166,15 @@ abstract class Node extends Model {
   }
 
   /**
+  * Get the value of the original models "parent_id" field.
+  *
+  * @return int
+  */
+  public function getOriginalParentId() {
+    return $this->getOriginal($this->getparentColumnName());
+  }
+
+  /**
    * Get the "left" field column name.
    *
    * @return string
@@ -409,31 +418,11 @@ abstract class Node extends Model {
   }
 
   /**
-   * Static query scope. Returns a query scope with all nodes which are at
-   * the middle of a branch (not root and not leaves).
-   *
-   * @return \Illuminate\Database\Query\Builder
-   */
-  public static function allTrunks() {
-    $instance = new static;
-
-    $grammar = $instance->getConnection()->getQueryGrammar();
-
-    $rgtCol = $grammar->wrap($instance->getQualifiedRightColumnName());
-    $lftCol = $grammar->wrap($instance->getQualifiedLeftColumnName());
-
-    return $instance->newQuery()
-                    ->whereNotNull($instance->getParentColumnName())
-                    ->whereRaw($rgtCol . ' - ' . $lftCol . ' != 1')
-                    ->orderBy($instance->getQualifiedOrderColumnName());
-  }
-
-  /**
    * Checks wether the underlying Nested Set structure is valid.
    *
    * @return boolean
    */
-  public static function isValidNestedSet() {
+  public static function isValid() {
     $validator = new SetValidator(new static);
 
     return $validator->passes();
@@ -442,13 +431,12 @@ abstract class Node extends Model {
   /**
    * Rebuilds the structure of the current Nested Set.
    *
-   * @param  bool $force
    * @return void
    */
-  public static function rebuild($force = false) {
+  public static function rebuild() {
     $builder = new SetBuilder(new static);
 
-    $builder->rebuild($force);
+    $builder->rebuild();
   }
 
   /**
@@ -459,6 +447,16 @@ abstract class Node extends Model {
    */
   public static function buildTree($nodeList) {
     return with(new static)->makeTree($nodeList);
+  }
+
+  /**
+   * Pass it a nested array of ID's to re-order the tree in the DB.
+   *
+   * @param   array|\Illuminate\Support\Contracts\ArrayableInterface
+   * @return  boolean
+   */
+  public static function rebuildTree($nodeList) {
+    return with(new static)->updateTree($nodeList);
   }
 
   /**
@@ -500,9 +498,8 @@ abstract class Node extends Model {
   public function scopeLimitDepth($query, $limit) {
     $depth  = $this->exists ? $this->getDepth() : $this->getLevel();
     $max    = $depth + $limit;
-    $scopes = array($depth, $max);
 
-    return $query->whereBetween($this->getDepthColumnName(), array(min($scopes), max($scopes)));
+    return $query->whereBetween($this->getDepthColumnName(), array($depth, $max));
   }
 
   /**
@@ -511,7 +508,7 @@ abstract class Node extends Model {
    * @return boolean
    */
   public function isRoot() {
-    return is_null($this->getParentId());
+    return ($this->exists) ? is_null($this->getOriginalParentId()) : is_null($this->getParentId());
   }
 
   /**
@@ -521,15 +518,6 @@ abstract class Node extends Model {
    */
   public function isLeaf() {
     return $this->exists && ($this->getRight() - $this->getLeft() == 1);
-  }
-
-  /**
-   * Returns true if this is a trunk node (not root or leaf).
-   *
-   * @return boolean
-   */
-  public function isTrunk() {
-    return !$this->isRoot() && !$this->isLeaf();
   }
 
   /**
@@ -687,33 +675,6 @@ abstract class Node extends Model {
    */
   public function getLeaves($columns = array('*')) {
     return $this->leaves()->get($columns);
-  }
-
-  /**
-   * Instance scope targeting all of its nested children which are between the
-   * root and the leaf nodes (middle branch).
-   *
-   * @return \Illuminate\Database\Query\Builder
-   */
-  public function trunks() {
-    $grammar = $this->getConnection()->getQueryGrammar();
-
-    $rgtCol = $grammar->wrap($this->getQualifiedRightColumnName());
-    $lftCol = $grammar->wrap($this->getQualifiedLeftColumnName());
-
-    return $this->descendants()
-                ->whereNotNull($this->getQualifiedParentColumnName())
-                ->whereRaw($rgtCol . ' - ' . $lftCol . ' != 1');
-  }
-
-  /**
-   * Return all of its nested children which are trunks.
-   *
-   * @param  array  $columns
-   * @return \Illuminate\Database\Eloquent\Collection
-   */
-  public function getTrunks($columns = array('*')) {
-    return $this->trunks()->get($columns);
   }
 
   /**
@@ -983,7 +944,9 @@ abstract class Node extends Model {
    * @return \Baum\Node
    */
   public function makeRoot() {
-    return $this->moveTo($this, 'root');
+    if ($this->isRoot()) return $this;
+
+    return $this->moveToRightOf($this->getRoot());
   }
 
   /**
@@ -1101,7 +1064,7 @@ abstract class Node extends Model {
 
       $self->descendantsAndSelf()->select($self->getKeyName())->lockForUpdate()->get();
 
-      $oldDepth = !is_null($self->getDepth()) ? $self->getDepth() : 0;
+      $oldDepth = !is_null($self->getDepth()) ?: 0;
 
       $newDepth = $self->getLevel();
 
@@ -1226,6 +1189,20 @@ abstract class Node extends Model {
     $mapper = new SetMapper($this);
 
     return $mapper->map($nodeList);
+  }
+
+  /**
+   * Maps the provided tree structure into the database using the current node
+   * as the parent. The provided tree structure will be inserted/updated as the
+   * descendancy subtree of the current node instance.
+   *
+   * @param   array|\Illuminate\Support\Contracts\ArrayableInterface
+   * @return  boolean
+   */
+  public function updateTree($nodeList) {
+    $mapper = new SetMapper($this);
+
+    return $mapper->updateMap($nodeList);
   }
 
   /**
